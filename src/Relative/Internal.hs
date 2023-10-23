@@ -31,7 +31,7 @@ module Relative.Internal
 import Data.Default
 import Data.Group
 import Data.Semigroup (Semigroup(stimes))
-import GHC.Exts as Exts
+import qualified GHC.Exts as Exts
 import Unaligned.Internal (View(..), Rev(..))
 
 --------------------------------------------------------------------------------
@@ -180,7 +180,7 @@ instance Default (Q a) where
 instance (Show a, Relative a) => Show (Q a) where
   showsPrec d = showsPrec d . Exts.toList 
 
-instance Relative a => IsList (Q a) where
+instance Relative a => Exts.IsList (Q a) where
   type Item (Q a) = a
   fromList = foldr cons nil
   fromListN _ = foldr cons nil
@@ -251,7 +251,7 @@ instance Relative a => Semigroup (Cat a) where
 instance Relative a => Monoid (Cat a) where
   mempty = E
 
-instance Relative a => IsList (Cat a) where
+instance Relative a => Exts.IsList (Cat a) where
   type Item (Cat a) = a
   fromList = foldr cons nil
   fromListN _ = foldr cons nil
