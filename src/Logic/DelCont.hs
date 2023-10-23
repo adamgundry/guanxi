@@ -4,9 +4,13 @@
 {-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE TypeApplications #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UnboxedTuples #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ViewPatterns #-}
 {-# OPTIONS_GHC -Wall -Wno-name-shadowing #-}
 
 module Logic.DelCont where
@@ -23,6 +27,7 @@ import Data.Coerce
 import Data.Maybe
 
 import Logic.Class
+import Unaligned.Base
 
 
 -- These are just IO wrappers around the delimited continuations primops, to
@@ -45,42 +50,74 @@ unIO (Types.IO io) = io
 
 -- | The effect signature of the logic monad: free monad on empty and <|>
 --
-data Free f a = Pure a | Op (f (Free f a))
+data Free m f a = Pure a | Op (f (Compose m (Free m f)) a)
 
+{-
+deriving instance Functor (f (Compose m (Free m f))) => Functor (Free m f)
 
-data LogicOp a where
-  EmptyOp :: LogicOp a
-  ChooseOp :: a -> a -> LogicOp a
-  OnceOp :: a -> LogicOp a
---  IfteOp :: b -> (b -> a) -> a -> LogicOp a
-  CleanupOp :: a -> IO () -> LogicOp a
+instance Functor (f (Compose m (Free m f))) => Applicative (Free m f) where
+  pure = Pure
+  (<*>) = ap
 
-type Comp m = Free (Compose LogicOp m)
+instance Functor (f (Compose m (Free m f))) => Monad (Free m f) where
+  return = pure
+  Pure a >>= f = f a
+  Op x >>= f = _ 
+-}
 
-pattern Empty :: Comp m a
-pattern Empty = Op (Compose EmptyOp)
+data LogicOp m a where
+  FailureOp   :: LogicOp m a
+  ChooseOp  :: m a -> m a -> LogicOp m a
+  OnceOp    :: m a -> LogicOp m a
+  CleanupOp :: m a -> IO () -> LogicOp m a
+
+deriving instance Functor m => Functor (LogicOp m)
+
+type Comp m = Free m LogicOp
+
+pattern Failure :: Comp m a
+pattern Failure = Op FailureOp
 
 pattern Choose :: m (Comp m a) -> m (Comp m a) -> Comp m a
-pattern Choose x y = Op (Compose (ChooseOp x y))
+pattern Choose x y = Op (ChooseOp (Compose x) (Compose y))
 
 pattern Once :: m (Comp m a) -> Comp m a
-pattern Once x = Op (Compose (OnceOp x))
+pattern Once x = Op (OnceOp (Compose x))
 
 pattern Cleanup :: m (Comp m a) -> IO () -> Comp m a
-pattern Cleanup x y = Op (Compose (CleanupOp x y))
+pattern Cleanup x y = Op (CleanupOp (Compose x) y)
 
-{-# COMPLETE Pure, Empty, Choose, Once, Cleanup #-}
+{-# COMPLETE Pure, Failure, Choose, Once, Cleanup #-}
 
 compAll :: MonadIO m => Comp m a -> m [a]
 compAll (Pure x)     = pure [x]
-compAll Empty        = pure []
+compAll Failure        = pure []
 compAll (Choose m n) = (++) <$> (compAll =<< m) <*> (compAll =<< n)
 compAll (Once m)     = fmap maybeToList . comp1 =<< m
 compAll (Cleanup m m_cleanup) = (compAll =<< m) <* liftIO m_cleanup
 
+compSplit :: MonadIO m => Comp m a -> m (View (WithCleanup a IO) (Comp m a))
+compSplit (Pure x) = pure (x :&&: pure () :&: Failure)
+compSplit Failure    = pure Empty
+compSplit (Choose m n) = do
+  mb <- compSplit =<< m
+  case mb of
+    vc :&: rest -> pure (vc :&: Choose (pure rest) n)
+    Empty -> compSplit =<< n
+compSplit (Once m) = do
+  x <- compSplit =<< m
+  case x of
+    Empty -> pure Empty
+    vc :&: _ -> pure (vc :&: Failure)
+compSplit (Cleanup m m_cleanup) = do
+  x <- compSplit =<< m
+  case x of
+    Empty -> liftIO m_cleanup *> pure Empty
+    v :&&: c :&: rest -> pure (v :&&: (c *> m_cleanup) :&: rest)
+
 comp1 :: MonadIO m => Comp m a -> m (Maybe a)
 comp1 (Pure x)     = pure (Just x)
-comp1 Empty        = pure Nothing
+comp1 Failure        = pure Nothing
 comp1 (Choose m n) = do
   mb <- comp1 =<< m
   case mb of
@@ -111,7 +148,7 @@ liftDupableIO :: IO a -> Logic a
 liftDupableIO io = MkLogic $ \ _ -> io
 
 instance Alternative Logic where
-  empty = controlLogic $ \ _ __ -> Empty
+  empty = controlLogic $ \ _ __ -> Failure
 
   MkLogic m <|> MkLogic n = controlLogic $ \ tag f ->
       Choose (f (m tag))
@@ -127,9 +164,23 @@ instance MonadLogic Logic where
 
   cleanup (MkLogic x) (MkLogic y) = controlLogic $ \ tag f -> Cleanup (f (x tag)) (y tag)
 
+{-
   once (MkLogic m) = controlLogic $ \ tag f -> Once (f (m tag))
 
---  ifte (MkLogic t) th el = 
+  ifte t th el = MkLogic $ \tag -> do
+        c <- runLogic t
+        mb <- compSplit c
+        case mb of
+          Empty -> unLogic el tag
+          v :&&: c :&: rest -> unLogic (cleanup (th v) (liftDupableIO c)) tag -- TODO rest
+-}
+
+  msplit m = liftDupableIO $ do
+      c <- runLogic m
+      mb <- compSplit c
+      case mb of
+        Empty -> pure Empty
+        v :&&: c :&: rest -> pure (v :&&: liftDupableIO c :&: reflectLogic rest)
 
 instance PrimMonad Logic where
   type PrimState Logic = RealWorld
@@ -144,12 +195,24 @@ runLogic m =
             run (MkLogic m) = prompt tag (m tag) >>= pure . handle
 
             handle :: Comp IO r -> Comp IO r
-            handle (Pure a)     = Pure a
-            handle Empty        = Empty
-            handle (Choose x y) = Choose (run (liftDupableIO x)) (run (liftDupableIO y))
-            handle (Once x)     = Once (run (liftDupableIO x))
-            handle (Cleanup x y) = Cleanup (run (liftDupableIO x)) y
+            handle (Pure a)       = Pure a
+            handle Failure        = Failure
+            handle (Choose x y)   = Choose (run (liftDupableIO x)) (run (liftDupableIO y))
+            handle (Once x)       = Once (run (liftDupableIO x))
+            handle (Cleanup x y)  = Cleanup (run (liftDupableIO x)) y
         in run (Pure <$> m)
+
+
+reflectLogic' :: IO (Comp IO r) -> Logic r
+reflectLogic' m = reflectLogic =<< liftDupableIO m
+
+reflectLogic :: Comp IO a -> Logic a
+reflectLogic (Pure x)              = pure x
+reflectLogic Failure               = empty
+reflectLogic (Choose x y)          = (reflectLogic' x) <|> (reflectLogic' y)
+reflectLogic (Once m)              = once (reflectLogic' m)
+reflectLogic (Cleanup m m_cleanup) = cleanup (reflectLogic' m) (liftDupableIO m_cleanup)
+
 
 observeAllT :: Logic r -> IO [r]
 observeAllT = compAll <=< runLogic
