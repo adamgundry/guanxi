@@ -9,6 +9,7 @@ import Control.Monad
 import Logic.Class
 import qualified Logic.Cont as Cont
 import qualified Logic.ContUnwind as ContUnwind
+import qualified Logic.DelCont as DelCont
 import qualified Logic.Naive as Naive
 import qualified Logic.Reflection as Reflection
 
@@ -20,6 +21,7 @@ spec :: Spec
 spec = do
   specFor "Cont"       Cont.observeAllT
   specFor "ContUnwind" ContUnwind.observeAllT
+  specFor "DelCont"    DelCont.observeAllT
   specFor "Naive"      Naive.observeAllT
   specFor "Reflection" Reflection.observeAllT
 
