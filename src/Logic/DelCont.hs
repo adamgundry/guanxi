@@ -15,7 +15,7 @@
 
 module Logic.DelCont where
 
-import qualified GHC.Prim as Prim (newPromptTag#, prompt#, control0#, RealWorld, State#, PromptTag#)
+import qualified GHC.Prim as Prim (newPromptTag#, prompt#, control0#, PromptTag#)
 import qualified GHC.Types as Types (IO(IO))
 
 import Control.Applicative
@@ -35,16 +35,13 @@ import Unaligned.Base
 newPromptTag :: (Prim.PromptTag# a -> IO r) -> IO r
 newPromptTag k = Types.IO $ \ st ->
     case Prim.newPromptTag# st of
-      (# st, tag #) -> unIO (k tag) st
+      (# st, tag #) -> coerce (k tag) st
 
 prompt :: Prim.PromptTag# a -> IO a -> IO a
 prompt tag = coerce (Prim.prompt# tag)
 
 control0 :: forall a b . Prim.PromptTag# a -> ((IO b -> IO a) -> IO a) -> IO b
 control0 tag f = Types.IO (Prim.control0# tag (coerce f))
-
-unIO :: IO a -> Prim.State# Prim.RealWorld -> (# Prim.State# Prim.RealWorld , a #)
-unIO (Types.IO io) = io
 
 
 data Free f a = Pure a | Op (f (Free f a))
@@ -71,15 +68,15 @@ pattern Cleanup x y = Op (Compose (CleanupOp x y))
 {-# COMPLETE Pure, Failure, Choose, Cleanup #-}
 
 
-comp1 :: MonadIO m => Comp m a -> m (Maybe a)
-comp1 (Pure x)     = pure (Just x)
-comp1 Failure        = pure Nothing
-comp1 (Choose m n) = do
-  mb <- comp1 =<< m
+compMaybe :: MonadIO m => Comp m a -> m (Maybe a)
+compMaybe (Pure x)     = pure (Just x)
+compMaybe Failure        = pure Nothing
+compMaybe (Choose m n) = do
+  mb <- compMaybe =<< m
   case mb of
     Just _  -> pure mb
-    Nothing -> comp1 =<< n
-comp1 (Cleanup m m_cleanup) = (comp1 =<< m) <* liftIO m_cleanup
+    Nothing -> compMaybe =<< n
+compMaybe (Cleanup m m_cleanup) = (compMaybe =<< m) <* liftIO m_cleanup
 
 compAll :: MonadIO m => Comp m a -> m [a]
 compAll (Pure x)     = pure [x]
@@ -140,8 +137,7 @@ instance MonadLogic Logic where
   cleanup (MkLogic x) (MkLogic y) = controlLogic $ \ tag f -> Cleanup (f (x tag)) (y tag)
 
   msplit m = liftDupableIO $ do
-      c <- runLogic m
-      mb <- compSplit c
+      mb <- observeSplit m
       case mb of
         Empty -> pure Empty
         v :&&: c :&: rest -> pure (v :&&: liftDupableIO c :&: reflectLogic rest)
@@ -165,33 +161,42 @@ runLogic m =
             handle (Cleanup x y)  = Cleanup (run (liftDupableIO x)) y
         in run (Pure <$> m)
 
-
-reflectLogic' :: IO (Comp IO r) -> Logic r
-reflectLogic' m = reflectLogic =<< liftDupableIO m
-
 reflectLogic :: Comp IO a -> Logic a
-reflectLogic (Pure x)              = pure x
-reflectLogic Failure               = empty
-reflectLogic (Choose x y)          = (reflectLogic' x) <|> (reflectLogic' y)
-reflectLogic (Cleanup m m_cleanup) = cleanup (reflectLogic' m) (liftDupableIO m_cleanup)
+reflectLogic c = case c of
+    Pure x              -> pure x
+    Failure             -> empty
+    Choose x y          -> help x <|> help y
+    Cleanup m m_cleanup -> cleanup (help m) (liftDupableIO m_cleanup)
+  where
+    help :: IO (Comp IO r) -> Logic r
+    help = reflectLogic <=< liftDupableIO
 
 
 observeAllT :: Logic r -> IO [r]
 observeAllT = compAll <=< runLogic
 
+observeMaybe :: Logic r -> IO (Maybe r)
+observeMaybe = compMaybe <=< runLogic
+
+observeSplit :: Logic r -> IO (View (WithCleanup r IO) (Comp IO r))
+observeSplit = compSplit <=< runLogic
+
 
 
 test :: Logic [Int]
 test = do
-  x <- pure 1 <|> pure 2
-  liftDupableIO $ print x
+  x <- pure 0 <|> pure 1 <|> pure 2
+  liftDupableIO $ putStrLn ("x = " ++ show x)
   y <- pure 3 <|> pure 4
-  liftDupableIO $ print y
-  when (x == 1) empty
+  liftDupableIO $ putStrLn ("y = " ++ show y)
+  when (x == 0) empty
   pure [x, y]
 
-go1 :: Logic r -> IO (Maybe r)
-go1 = comp1 <=< runLogic
+eg1 :: IO [[Int]]
+eg1 = observeAllT test
 
-eg :: IO [[Int]]
-eg = observeAllT test
+eg2 :: IO (Maybe [Int])
+eg2 = observeMaybe test
+
+eg3 :: IO [[Int]]
+eg3 = observeAllT (once test)
