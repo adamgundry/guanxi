@@ -24,7 +24,6 @@ import Control.Monad.IO.Class
 import Control.Monad.Primitive
 import Data.Functor.Compose
 import Data.Coerce
-import Data.Maybe
 
 import Logic.Class
 import Unaligned.Base
@@ -48,27 +47,13 @@ unIO :: IO a -> Prim.State# Prim.RealWorld -> (# Prim.State# Prim.RealWorld , a 
 unIO (Types.IO io) = io
 
 
--- | The effect signature of the logic monad: free monad on empty and <|>
---
 data Free f a = Pure a | Op (f (Free f a))
 
-{-
-deriving instance Functor (f (Compose m (Free m f))) => Functor (Free m f)
-
-instance Functor (f (Compose m (Free m f))) => Applicative (Free m f) where
-  pure = Pure
-  (<*>) = ap
-
-instance Functor (f (Compose m (Free m f))) => Monad (Free m f) where
-  return = pure
-  Pure a >>= f = f a
-  Op x >>= f = _ 
--}
-
+-- | The effect signature of the logic monad: free monad on 'empty', '<|>' and
+-- 'cleanup'.
 data LogicOp a where
   FailureOp :: LogicOp a
   ChooseOp  :: a -> a -> LogicOp a
-  OnceOp    :: a -> LogicOp a
   CleanupOp :: a -> IO () -> LogicOp a
   deriving Functor
 
@@ -80,19 +65,26 @@ pattern Failure = Op (Compose FailureOp)
 pattern Choose :: m (Comp m a) -> m (Comp m a) -> Comp m a
 pattern Choose x y = Op (Compose (ChooseOp x y))
 
-pattern Once :: m (Comp m a) -> Comp m a
-pattern Once x = Op (Compose (OnceOp x))
-
 pattern Cleanup :: m (Comp m a) -> IO () -> Comp m a
 pattern Cleanup x y = Op (Compose (CleanupOp x y))
 
-{-# COMPLETE Pure, Failure, Choose, Once, Cleanup #-}
+{-# COMPLETE Pure, Failure, Choose, Cleanup #-}
+
+
+comp1 :: MonadIO m => Comp m a -> m (Maybe a)
+comp1 (Pure x)     = pure (Just x)
+comp1 Failure        = pure Nothing
+comp1 (Choose m n) = do
+  mb <- comp1 =<< m
+  case mb of
+    Just _  -> pure mb
+    Nothing -> comp1 =<< n
+comp1 (Cleanup m m_cleanup) = (comp1 =<< m) <* liftIO m_cleanup
 
 compAll :: MonadIO m => Comp m a -> m [a]
 compAll (Pure x)     = pure [x]
-compAll Failure        = pure []
+compAll Failure      = pure []
 compAll (Choose m n) = (++) <$> (compAll =<< m) <*> (compAll =<< n)
-compAll (Once m)     = fmap maybeToList . comp1 =<< m
 compAll (Cleanup m m_cleanup) = (compAll =<< m) <* liftIO m_cleanup
 
 compSplit :: MonadIO m => Comp m a -> m (View (WithCleanup a IO) (Comp m a))
@@ -103,27 +95,11 @@ compSplit (Choose m n) = do
   case mb of
     vc :&: rest -> pure (vc :&: Choose (pure rest) n)
     Empty -> compSplit =<< n
-compSplit (Once m) = do
-  x <- compSplit =<< m
-  case x of
-    Empty -> pure Empty
-    vc :&: _ -> pure (vc :&: Failure)
 compSplit (Cleanup m m_cleanup) = do
   x <- compSplit =<< m
   case x of
     Empty -> liftIO m_cleanup *> pure Empty
     v :&&: c :&: rest -> pure (v :&&: (c *> m_cleanup) :&: rest)
-
-comp1 :: MonadIO m => Comp m a -> m (Maybe a)
-comp1 (Pure x)     = pure (Just x)
-comp1 Failure        = pure Nothing
-comp1 (Choose m n) = do
-  mb <- comp1 =<< m
-  case mb of
-    Just _  -> pure mb
-    Nothing -> comp1 =<< n
-comp1 (Once m) = comp1 =<< m
-comp1 (Cleanup m m_cleanup) = (comp1 =<< m) <* liftIO m_cleanup
 
 
 type Tag r = Prim.PromptTag# (Comp IO r)
@@ -163,17 +139,6 @@ instance MonadLogic Logic where
 
   cleanup (MkLogic x) (MkLogic y) = controlLogic $ \ tag f -> Cleanup (f (x tag)) (y tag)
 
-{-
-  once (MkLogic m) = controlLogic $ \ tag f -> Once (f (m tag))
-
-  ifte t th el = MkLogic $ \tag -> do
-        c <- runLogic t
-        mb <- compSplit c
-        case mb of
-          Empty -> unLogic el tag
-          v :&&: c :&: rest -> unLogic (cleanup (th v) (liftDupableIO c)) tag -- TODO rest
--}
-
   msplit m = liftDupableIO $ do
       c <- runLogic m
       mb <- compSplit c
@@ -197,7 +162,6 @@ runLogic m =
             handle (Pure a)       = Pure a
             handle Failure        = Failure
             handle (Choose x y)   = Choose (run (liftDupableIO x)) (run (liftDupableIO y))
-            handle (Once x)       = Once (run (liftDupableIO x))
             handle (Cleanup x y)  = Cleanup (run (liftDupableIO x)) y
         in run (Pure <$> m)
 
@@ -209,7 +173,6 @@ reflectLogic :: Comp IO a -> Logic a
 reflectLogic (Pure x)              = pure x
 reflectLogic Failure               = empty
 reflectLogic (Choose x y)          = (reflectLogic' x) <|> (reflectLogic' y)
-reflectLogic (Once m)              = once (reflectLogic' m)
 reflectLogic (Cleanup m m_cleanup) = cleanup (reflectLogic' m) (liftDupableIO m_cleanup)
 
 
