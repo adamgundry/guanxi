@@ -50,7 +50,7 @@ unIO (Types.IO io) = io
 
 -- | The effect signature of the logic monad: free monad on empty and <|>
 --
-data Free m f a = Pure a | Op (f (Compose m (Free m f)) a)
+data Free f a = Pure a | Op (f (Free f a))
 
 {-
 deriving instance Functor (f (Compose m (Free m f))) => Functor (Free m f)
@@ -65,27 +65,26 @@ instance Functor (f (Compose m (Free m f))) => Monad (Free m f) where
   Op x >>= f = _ 
 -}
 
-data LogicOp m a where
-  FailureOp   :: LogicOp m a
-  ChooseOp  :: m a -> m a -> LogicOp m a
-  OnceOp    :: m a -> LogicOp m a
-  CleanupOp :: m a -> IO () -> LogicOp m a
+data LogicOp a where
+  FailureOp :: LogicOp a
+  ChooseOp  :: a -> a -> LogicOp a
+  OnceOp    :: a -> LogicOp a
+  CleanupOp :: a -> IO () -> LogicOp a
+  deriving Functor
 
-deriving instance Functor m => Functor (LogicOp m)
-
-type Comp m = Free m LogicOp
+type Comp m = Free (Compose LogicOp m)
 
 pattern Failure :: Comp m a
-pattern Failure = Op FailureOp
+pattern Failure = Op (Compose FailureOp)
 
 pattern Choose :: m (Comp m a) -> m (Comp m a) -> Comp m a
-pattern Choose x y = Op (ChooseOp (Compose x) (Compose y))
+pattern Choose x y = Op (Compose (ChooseOp x y))
 
 pattern Once :: m (Comp m a) -> Comp m a
-pattern Once x = Op (OnceOp (Compose x))
+pattern Once x = Op (Compose (OnceOp x))
 
 pattern Cleanup :: m (Comp m a) -> IO () -> Comp m a
-pattern Cleanup x y = Op (CleanupOp (Compose x) y)
+pattern Cleanup x y = Op (Compose (CleanupOp x y))
 
 {-# COMPLETE Pure, Failure, Choose, Once, Cleanup #-}
 
