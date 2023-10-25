@@ -132,8 +132,6 @@ controlLogic c = MkLogic $ \tag -> control0 tag $ pure . c tag
 instance MonadPlus Logic
 
 instance MonadLogic Logic where
-  pureWithCleanup (a :&&: m_clean) = cleanup (pure a) m_clean
-
   cleanup (MkLogic x) (MkLogic y) = controlLogic $ \ tag f -> Cleanup (f (x tag)) (y tag)
 
   msplit m = liftDupableIO $ do

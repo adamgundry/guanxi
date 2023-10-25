@@ -39,7 +39,7 @@ mapViewWithCleanup _ Empty = Empty
 class MonadPlus m => MonadLogic m where
 
   pureWithCleanup :: WithCleanup a m -> m a
-  pureWithCleanup (a :&&: m_clean) = pure a <|> (m_clean *> empty)
+  pureWithCleanup (a :&&: m_clean) = cleanup (pure a) m_clean
 
   cleanup :: m a -> m () -> m a
   cleanup m m_clean = m <|> (m_clean *> empty)
